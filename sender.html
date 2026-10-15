@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QR File Sender</title>
+  <!-- QRious library for fast Canvas QR generation -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #1e293b;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      justify-content: center;
+    }
+    .container {
+      background: var(--card);
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+    }
+    h1 { margin-top: 0; font-size: 1.5rem; }
+    .control-group {
+      margin: 15px 0;
+      text-align: left;
+    }
+    label {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+    input[type="file"], select, input[type="range"] {
+      width: 100%;
+      padding: 8px;
+      box-sizing: border-box;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+    }
+    .qr-wrapper {
+      margin: 20px auto;
+      padding: 15px;
+      background: #fff;
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      display: inline-block;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto !important;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      margin-top: 15px;
+    }
+    button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 18px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+    button:hover:not(:disabled) { opacity: 0.9; }
+    .status {
+      margin-top: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #475569;
+    }
+    .hint {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 15px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h1>📤 QR File Sender</h1>
+  
+  <div class="control-group">
+    <label for="fileInput">1. Select File (Best for files &lt; 100 KB)</label>
+    <input type="file" id="fileInput">
+  </div>
+
+  <div class="control-group">
+    <label for="chunkSize">Chunk Size (Smaller = Easier to scan)</label>
+    <select id="chunkSize">
+      <option value="250">250 bytes (Very Easy Scan)</option>
+      <option value="400" selected>400 bytes (Balanced)</option>
+      <option value="650">650 bytes (Dense / High Res)</option>
+    </select>
+  </div>
+
+  <div class="control-group">
+    <label for="fpsRange">Speed: <span id="fpsValue">5</span> QR codes / sec</label>
+    <input type="range" id="fpsRange" min="1" max="12" value="5">
+  </div>
+
+  <div class="qr-wrapper">
+    <canvas id="qrCanvas" width="320" height="320"></canvas>
+  </div>
+
+  <div class="status" id="statusText">Select a file to begin</div>
+
+  <div class="controls">
+    <button id="prevBtn" disabled>⏮ Prev</button>
+    <button id="playPauseBtn" disabled>⏸ Pause</button>
+    <button id="nextBtn" disabled>⏭ Next</button>
+  </div>
+
+  <p class="hint">
+    Tip: If the receiver misses 1 or 2 specific chunks at the end, pause the stream and use <b>Prev / Next</b> to show the missing chunk number!
+  </p>
+</div>
+
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const chunkSizeSelect = document.getElementById('chunkSize');
+  const fpsRange = document.getElementById('fpsRange');
+  const fpsValue = document.getElementById('fpsValue');
+  const statusText = document.getElementById('statusText');
+  const playPauseBtn = document.getElementById('playPauseBtn');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const qrCanvas = document.getElementById('qrCanvas');
+
+  let qr = new QRious({
+    element: qrCanvas,
+    size: 320,
+    value: 'Waiting for file...',
+    level: 'L' // Low error correction keeps the QR less dense and faster for cameras to read
+  });
+
+  let frames = [];
+  let currentIndex = 0;
+  let timer = null;
+  let isPlaying = false;
+  let currentFile = null;
+
+  fpsRange.addEventListener('input', () => {
+    fpsValue.textContent = fpsRange.value;
+    if (isPlaying) {
+      startLoop();
+    }
+  });
+
+  chunkSizeSelect.addEventListener('change', () => {
+    if (currentFile) processFile(currentFile);
+  });
+
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) {
+      currentFile = e.target.files[0];
+      processFile(currentFile);
+    }
+  });
+
+  function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+
+  function processFile(file) {
+    stopLoop();
+    statusText.textContent = 'Processing file...';
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const base64Data = arrayBufferToBase64(e.target.result);
+      const chunkSize = parseInt(chunkSizeSelect.value, 10);
+      const dataChunks = [];
+
+      for (let i = 0; i < base64Data.length; i += chunkSize) {
+        dataChunks.push(base64Data.substring(i, i + chunkSize));
+      }
+
+      const totalChunks = dataChunks.length;
+      const transferId = Date.now().toString(36);
+      frames = [];
+
+      // Frame 0: Metadata Header Frame
+      // Format: H|<transferId>|<totalChunks>|<encodedFileName>|<fileSize>|<encodedMimeType>
+      const headerFrame = [
+        'H',
+        transferId,
+        totalChunks,
+        encodeURIComponent(file.name),
+        file.size,
+        encodeURIComponent(file.type || 'application/octet-stream')
+      ].join('|');
+
+      frames.push({ label: `Header (${file.name})`, data: headerFrame });
+
+      // Data Frames
+      // Format: D|<transferId>|<chunkIndex>|<totalChunks>|<base64Chunk>
+      dataChunks.forEach((chunk, idx) => {
+        const dataFrame = `D|${transferId}|${idx}|${totalChunks}|${chunk}`;
+        frames.push({ label: `Chunk ${idx + 1} of ${totalChunks}`, data: dataFrame });
+        
+        // Inject header frame every 15 chunks so receiver can start scanning at any time
+        if ((idx + 1) % 15 === 0 && idx !== totalChunks - 1) {
+          frames.push({ label: `Header Sync (${file.name})`, data: headerFrame });
+        }
+      });
+
+      currentIndex = 0;
+      playPauseBtn.disabled = false;
+      prevBtn.disabled = false;
+      nextBtn.disabled = false;
+      
+      startLoop();
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function renderCurrentFrame() {
+    if (frames.length === 0) return;
+    const frame = frames[currentIndex];
+    qr.value = frame.data;
+    statusText.textContent = `Showing: ${frame.label}`;
+  }
+
+  function startLoop() {
+    if (timer) clearInterval(timer);
+    isPlaying = true;
+    playPauseBtn.textContent = '⏸ Pause';
+    const interval = 1000 / parseInt(fpsRange.value, 10);
+    renderCurrentFrame();
+    timer = setInterval(() => {
+      currentIndex = (currentIndex + 1) % frames.length;
+      renderCurrentFrame();
+    }, interval);
+  }
+
+  function stopLoop() {
+    if (timer) clearInterval(timer);
+    timer = null;
+    isPlaying = false;
+    playPauseBtn.textContent = '▶ Play';
+  }
+
+  playPauseBtn.addEventListener('click', () => {
+    if (isPlaying) stopLoop();
+    else startLoop();
+  });
+
+  prevBtn.addEventListener('click', () => {
+    stopLoop();
+    currentIndex = (currentIndex - 1 + frames.length) % frames.length;
+    renderCurrentFrame();
+  });
+
+  nextBtn.addEventListener('click', () => {
+    stopLoop();
+    currentIndex = (currentIndex + 1) % frames.length;
+    renderCurrentFrame();
+  });
+</script>
+
+</body>
+</html>
